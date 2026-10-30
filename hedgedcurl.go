@@ -2,11 +2,13 @@ package main
 
 import (
 	"context"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"net/http"
 	"os"
+	"strings"
 	"time"
 )
 
@@ -29,7 +31,6 @@ func fetch(ctx context.Context, url string) result {
 		return result{url: url, err: err}
 	}
 	defer resp.Body.Close()
-
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return result{url: url, err: err}
@@ -42,30 +43,55 @@ func fetch(ctx context.Context, url string) result {
 		body:   body,
 	}
 }
-
 func main() {
 	var timeout int
 	flag.IntVar(&timeout, "t", 15, "таймаут в секундах")
 	flag.IntVar(&timeout, "timeout", 15, "таймаут в секундах")
-
 	flag.Usage = func() {
-		fmt.Fprintln(os.Stderr, "использование: hedgedcurl [-t SECONDS] URL [URL...]")
+		fmt.Fprintln(os.Stderr, "Использование: hedgedcurl [-t SECONDS] URL [URL...]")
 		flag.PrintDefaults()
 	}
 	flag.Parse()
-
 	urls := flag.Args()
 	if len(urls) == 0 {
 		flag.Usage()
 		os.Exit(1)
 	}
-	fmt.Println("timeout:", timeout, "urls:", urls)
-
 	ctx, cancel := context.WithTimeout(context.Background(), time.Duration(timeout)*time.Second)
 	defer cancel()
-	res := fetch(ctx, urls[0])
-	if res.err != nil {
-		fmt.Fprintln(os.Stderr, "ошибка:", res.err)
+	results := make(chan result, len(urls))
+	for _, u := range urls {
+		if !strings.Contains(u, "://") {
+			u = "https://" + u
+		}
+		go func(u string) {
+			results <- fetch(ctx, u)
+		}(u)
+	}
+	var res result
+	var lastErr error
+	timedOut := false
+	got := false
+	for range urls {
+		r := <-results
+		if r.err != nil {
+			lastErr = r.err
+			if errors.Is(r.err, context.DeadlineExceeded) {
+				timedOut = true
+			}
+			continue
+		}
+		res = r
+		got = true
+		cancel()
+		break
+	}
+	if !got {
+		if timedOut {
+			fmt.Fprintln(os.Stderr, "ошибка: превышено время ожидания")
+			os.Exit(228)
+		}
+		fmt.Fprintln(os.Stderr, "все запросы завершились ошибкой:", lastErr)
 		os.Exit(1)
 	}
 	fmt.Println(res.proto, res.status)
